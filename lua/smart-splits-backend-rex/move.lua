@@ -15,7 +15,11 @@ function M.move(direction, opts)
   opts = opts or {}
   local at_edge = opts.at_edge or 'stop'
 
-  if rex.focus(direction, at_edge == 'wrap') then
+  local focused = rex.focus(direction, at_edge == 'wrap')
+  if focused == nil then
+    return false
+  end
+  if focused then
     return true
   end
 

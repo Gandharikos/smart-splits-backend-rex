@@ -34,7 +34,10 @@ run = "rm -rf deps/smart-splits.nvim && mise run deps"
 
 [tasks.test-rex]
 description = "Run Rex-side module tests without a live Rex server"
-run = "nvim --headless -u NONE -l tests/rex/test.lua"
+run = [
+  "nvim --headless -u NONE -i NONE -l tests/rex/test.lua",
+  "nvim --headless -u NONE -i NONE -l tests/rex/process_integration.lua",
+]
 
 [tasks.test]
 description = "Run all tests"
@@ -61,7 +64,7 @@ run = [
 
 [tasks.lint]
 description = "Run linters"
-run = ["selene ./lua/ ./tests/", "actionlint"]
+run = ["selene ./lua/ ./rex/ ./tests/", "actionlint"]
 
 [tasks.typecheck]
 description = "Run LuaLS type checking"

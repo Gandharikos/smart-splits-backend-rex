@@ -57,26 +57,39 @@ local function succeeded(args)
   return result ~= nil and result.code == 0
 end
 
----`rex focus` exits 0 even at the edge of the layout, so focus through the API instead and compare the
----session's structural revision, which changes only when the focus moved.
+---A revision can change without focus moving (e.g. unzooming or renaming a pane).
+---Compare the actual focused block instead, and reject calls from a stale pane.
 local FOCUS_SCRIPT = [[
-local view = assert(rex.session.view({}))
-local result = assert(rex.session.focus_direction({ direction = rex.args.direction, wrap = rex.args.wrap == true }))
-return { handled = result.revision ~= view.revision }
+local function focused(view)
+  for _, window in ipairs(view.windows or {}) do
+    if window.window_id == view.active_window_id then
+      return window.focused_block_id
+    end
+  end
+end
+local before = focused(assert(rex.session.view({})))
+assert(before and before == rex.block_id, 'smart-splits: source pane is no longer focused')
+assert(rex.session.focus_direction({ direction = rex.args.direction, wrap = rex.args.wrap == true }))
+local after = focused(assert(rex.session.view({})))
+assert(after, 'smart-splits: no focused pane after navigation')
+return { handled = after ~= before }
 ]]
 
 ---Focuses the nearest block in `direction`, or the one on the other side with `wrap`.
----Returns false when there is no block to focus.
+---Returns false at the edge, or nil on failure. Only a confirmed edge may create a split.
 ---@param direction SmartSplitsDirection
 ---@param wrap? boolean
----@return boolean
+---@return boolean?
 function M.focus(direction, wrap)
   local result = M.run({ 'do', '-e', FOCUS_SCRIPT, 'direction=' .. direction, 'wrap=' .. tostring(wrap == true) })
   if result == nil or result.code ~= 0 then
-    return false
+    return nil
   end
   local ok, decoded = pcall(vim.json.decode, result.stdout)
-  return ok and type(decoded) == 'table' and decoded.handled == true
+  if not ok or type(decoded) ~= 'table' or type(decoded.handled) ~= 'boolean' then
+    return nil
+  end
+  return decoded.handled
 end
 
 ---Splits the current block, placing the new terminal in `direction`.

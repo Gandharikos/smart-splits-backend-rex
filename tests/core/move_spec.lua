@@ -61,6 +61,22 @@ describe('move()', function()
     assert.is_false(backend.move('left'))
   end)
 
+  for _, response in ipairs({
+    { code = 1 },
+    { code = 124 },
+    { code = 0, stdout = 'not JSON' },
+    { code = 0, stdout = '{}' },
+    { code = 0, stdout = '{"handled":"false"}' },
+    { code = 0, stdout = 'null' },
+  }) do
+    it('does not split after a failed or invalid focus result: ' .. vim.inspect(response), function()
+      local backend = require('smart-splits-backend-rex')
+      h.respond('do -e', response)
+      assert.is_false(backend.move('right', { at_edge = 'split' }))
+      assert.are.equal(1, #h.calls)
+    end)
+  end
+
   it('splits at the edge with at_edge=split', function()
     local backend = require('smart-splits-backend-rex')
     h.respond('do -e', AT_EDGE)
@@ -74,6 +90,12 @@ describe('move()', function()
     h.respond('do -e', HANDLED)
     assert.is_true(backend.move('right', { at_edge = 'split' }))
     assert.are.equal(1, #h.calls)
+  end)
+
+  it('reports failure when creating a split fails', function()
+    h.respond('do -e', AT_EDGE)
+    h.respond('split', { code = 1 })
+    assert.is_false(require('smart-splits-backend-rex').move('left', { at_edge = 'split' }))
   end)
 
   it('does nothing outside Rex', function()

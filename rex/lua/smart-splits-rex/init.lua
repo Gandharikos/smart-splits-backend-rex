@@ -5,30 +5,140 @@
 
 local M = { version = '0.1.0', author = 'rawnly' }
 
-local function is_vim(ctx)
-  if not ctx.block_id then
-    return nil
-  end
-  local proc = rex.block.call('com.superlogical.terminal', 'process', { block_id = ctx.block_id })
-  if not proc then
-    return nil
-  end
-  local fg = proc.foreground
-  if not fg then
-    return false
-  end
-  for _, name in ipairs({ fg.name or '', (fg.argv0 or ''):match('[^/]*$') }) do
-    if name:match('^n?vim') then
+local vim_names = {
+  vi = true,
+  vim = true,
+  nvim = true,
+  view = true,
+  gvim = true,
+  gview = true,
+  vimdiff = true,
+  nvimdiff = true,
+  gvimdiff = true,
+  lvim = true,
+  vimx = true,
+}
+
+---@param command string?
+---@return string
+local function executable_name(command)
+  local name = (command or ''):match('([^/\\]+)$') or ''
+  -- Nix may expose the wrapped executable rather than the wrapper's name.
+  return name:lower():gsub('^%.', ''):gsub('%-wrapped$', '')
+end
+
+---@param foreground table
+---@return boolean
+local function named_vim(foreground)
+  for _, field in ipairs({ 'name', 'argv0', 'path', 'invoked_path' }) do
+    if vim_names[executable_name(foreground[field])] then
       return true
     end
   end
   return false
 end
 
+---@param ctx table
+---@param foreground table
+---@return boolean? is_vim
+---@return string? error
+local function group_has_vim(ctx, foreground)
+  if type(foreground.pid) ~= 'number' or foreground.pid <= 0 then
+    return nil, 'foreground process has no valid PID'
+  end
+
+  -- A block may run on another host. Its PIDs must never be looked up locally.
+  local server, server_error = rex.call('server.status', {})
+  local description, block_error = rex.session.describe_block({ block_id = ctx.block_id })
+  local host = description and description.block and description.block.host_id
+  if not server or not server.host_id or not host or host == '' then
+    return nil, server_error or block_error or 'cannot verify the terminal host'
+  end
+  if host ~= server.host_id then
+    return nil, 'terminal is on another host; load smart-splits-rex on the terminal host'
+  end
+
+  -- One snapshot avoids both recursive child searches (which include background jobs)
+  -- and assuming the API's foreground PID is the process-group leader.
+  local result, exec_error = rex.exec({ 'ps', '-ax', '-o', 'pid=,pgid=,tpgid=,stat=,comm=' }, { timeout = 1 })
+  if not result or not result.ok then
+    return nil, exec_error or (result and result.stderr ~= '' and result.stderr) or 'foreground process scan failed'
+  end
+  local processes, leader = {}, nil
+  for line in result.stdout:gmatch('[^\r\n]+') do
+    local pid, group, terminal_group, state, command = line:match('^%s*(%d+)%s+(%d+)%s+([%-]?%d+)%s+(%S+)%s+(.+)$')
+    if pid then
+      local process = {
+        pid = tonumber(pid),
+        group = tonumber(group),
+        terminal_group = tonumber(terminal_group),
+        state = state,
+        name = executable_name(command),
+      }
+      processes[#processes + 1] = process
+      if process.pid == foreground.pid then
+        leader = process
+      end
+    end
+  end
+  if not leader or leader.group <= 0 or leader.group ~= leader.terminal_group then
+    return nil, 'foreground process changed or has no controlling terminal; retry the key'
+  end
+  for _, process in ipairs(processes) do
+    if
+      process.group == leader.group
+      and process.terminal_group == leader.group
+      and not process.state:find('[TtZX]')
+      and vim_names[process.name]
+    then
+      return true
+    end
+  end
+  return false
+end
+
+---Detect the terminal's active editor, including one launched by Yazi or broot.
+---Call from Rex's server-side configuration, where rex.exec runs on the server.
+---@param ctx table
+---@return boolean? is_vim nil means detection failed, not that the pane is a shell.
+---@return string? error
+function M.is_vim(ctx)
+  if not ctx.block_id then
+    return nil, 'no terminal block in the action context'
+  end
+  local proc, err = rex.block.call('com.superlogical.terminal', 'process', { block_id = ctx.block_id })
+  if not proc then
+    return nil, err or 'cannot query the terminal process'
+  end
+  local fg = proc.foreground
+  if not fg then
+    return false
+  end
+  if named_vim(fg) then
+    return true
+  end
+  return group_has_vim(ctx, fg)
+end
+
 local function forward_if_vim(ctx, args)
-  local vim = is_vim(ctx)
+  local vim, err = M.is_vim(ctx)
   if vim == nil then
-    error('smart-splits: cannot determine foreground process', 0)
+    error('smart-splits: ' .. err, 0)
+  end
+  -- rex.exec yields to other actions. Do not send keys or resize a newly focused pane.
+  local view, view_error = rex.session.view({})
+  if not view then
+    error('smart-splits: ' .. (view_error or 'cannot query session focus'), 0)
+  end
+  local focused
+  for _, window in ipairs(view.windows or {}) do
+    if window.window_id == view.active_window_id then
+      focused = window.focused_block_id
+      break
+    end
+  end
+  if focused ~= ctx.block_id then
+    error('smart-splits: focused pane changed; retry the key', 0)
   end
   if not vim then
     return false
@@ -46,6 +156,7 @@ function M.setup(opts)
   rex.action({
     name = 'smart_splits_focus',
     title = 'Smart Splits: Focus Pane',
+    repeats = true,
     args = {
       type = 'object',
       required = { 'direction' },
@@ -58,7 +169,7 @@ function M.setup(opts)
       if forward_if_vim(ctx, args) then
         return
       end
-      local _, err = rex.session.focus_direction({ direction = args.direction })
+      local _, err = rex.session.focus_direction({ direction = args.direction, wrap = false })
       if err then
         error('smart-splits: ' .. err, 0)
       end
@@ -67,6 +178,7 @@ function M.setup(opts)
   rex.action({
     name = 'smart_splits_resize',
     title = 'Smart Splits: Resize Pane',
+    repeats = true,
     args = {
       type = 'object',
       required = { 'direction' },

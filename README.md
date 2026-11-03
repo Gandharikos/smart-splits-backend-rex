@@ -107,78 +107,58 @@ end
 
 These bindings intercept the selected keys in all panes; only choose keys you want to reserve. Reload the config after adding them.
 
-### Without the Rex module
+### Foreground detection (including Yazi and broot)
 
-The following manual configuration is an alternative to the Rex module above. Don't register both sets of bindings.
+Rex bindings run before the terminal receives a key. The module must distinguish an editor
+from an ordinary pane before deciding whether to forward the key or operate on the Rex layout.
 
-Rex key bindings run before the terminal sees the key, so binding `ctrl+h/j/k/l` straight to
-`pane.focus.*` in Rex means Neovim never receives them. Bind them to a function instead, one that
-returns `false` when Neovim is the foreground process so the key falls through to it. Neovim then
-moves between its own windows and hands off to Rex through this backend at the edge. In any other
-pane the keys move between Rex panes.
+Rex's `process.foreground` can describe the **process-group leader**, not the editor currently
+using the terminal. For example, when Yazi or broot launches Neovim, the leader may still be
+`yazi` or `broot`. Checking only its name loses both navigation and resize keys.
 
-In your Rex `init.lua`:
+The module first recognizes Vim-family executables using the process name and executable paths,
+including Nix's `.nvim-wrapped`. Otherwise, it uses one `ps` snapshot to find live Vim processes
+in that terminal's **foreground process group**. It does not search arbitrary descendants or
+other terminals, and ignores stopped, traced, zombie, and dead processes. Detection is repeated
+on each key, so exiting, suspending, or resuming the editor needs no persistent pane marker.
+Actions also check that the source pane is still focused after detection.
+
+The process-group fallback requires:
+
+- A Unix Rex server with `rex.exec`, `server.status`, and `session.describe_block` support.
+- `ps` on the server's PATH, supporting `pid`, `pgid`, `tpgid`, `stat`, and `comm` columns
+  (macOS/BSD `ps` or Linux procps). Each scan has a one-second timeout.
+- The terminal block and the executing server to report the same `host_id`. A remote PID must
+  never be looked up on the wrong machine. Load the module on the terminal's owning server.
+
+An unknown host, failed process query, failed scan, or focus change reports an error instead of
+silently treating the pane as a shell and moving or resizing the wrong pane. Directly recognized
+editors do not need `ps`. SSH sessions or nested multiplexers that hide the editor in another
+process namespace are not automatically detected.
+
+Custom server-side actions can reuse the same detection without registering the supplied actions:
 
 ```lua
-local function is_vim(ctx)
-  local proc = rex.block.call('com.superlogical.terminal', 'process', { block_id = ctx.block_id })
-  local fg = proc and proc.foreground
-  if not fg then
-    return false
-  end
-  -- `name` is not always the executable's name, so check `argv0` too
-  for _, s in ipairs({ fg.name or '', (fg.argv0 or ''):match('[^/]*$') }) do
-    if s:match('^n?vim') then
-      return true
-    end
-  end
-  return false
-end
-
-for key, direction in pairs({ h = 'left', j = 'down', k = 'up', l = 'right' }) do
-  rex.bind('ctrl+' .. key, function(ctx)
-    if is_vim(ctx) then
-      return false
-    end
-    rex.session.focus_direction({ direction = direction })
-    return true
-  end)
+local smart_splits = dofile('/absolute/path/to/smart-splits-backend-rex/rex/lua/smart-splits-rex/init.lua')
+-- Inside an action's run(ctx, args):
+local is_vim, err = smart_splits.is_vim(ctx)
+if is_vim == nil then
+  error(err, 0)
 end
 ```
 
-Run `rex config reload` to apply it.
+`is_vim(ctx)` returns `true`, `false`, or `nil, error`. Run it in the server configuration;
+`rex.exec` in a CLI script runs on the CLI machine, which may not be the terminal's host.
+Prefer the supplied actions for key bindings; they also handle key forwarding and focus checks.
 
 ### Resizing
 
-`alt+h/j/k/l` need no Rex binding for Neovim: Rex passes unbound keys through, so smart-splits
-receives them and resizes Rex panes through this backend when the Neovim window fills the axis.
+`alt+h/j/k/l` need no Rex binding if you only resize from Neovim: unbound keys pass through to
+the editor, and smart-splits calls Rex at the edge. To resize from ordinary panes too, use the
+`smart_splits_resize` bindings above. Those bindings reserve the keys in all panes.
 
 On macOS, Option must be sent as Alt, otherwise Option+h types `˙` and `<A-h>` never fires in
 Neovim. Check with `:lua print(vim.fn.getcharstr())` and press Option+h; it should print `<M-h>`.
-
-To also resize Rex panes from panes that aren't running Neovim, bind the keys to an action.
-`rex.client.queue` only works inside actions, not in functions bound with `rex.bind`, so the
-action forwards the key to Neovim itself instead of falling through:
-
-```lua
-rex.action({
-  name = 'smart_splits_resize',
-  title = 'Smart Splits: Resize Pane',
-  run = function(ctx, args)
-    if is_vim(ctx) then
-      rex.client.queue('pane.send_key', { key = args.key })
-    else
-      rex.client.queue('pane.resize', { direction = args.direction, amount = 3 })
-    end
-  end,
-})
-
-for key, direction in pairs({ h = 'left', j = 'down', k = 'up', l = 'right' }) do
-  rex.bind('alt+' .. key, 'smart_splits_resize', { key = 'alt+' .. key, direction = direction })
-end
-```
-
-Binding them in Rex means shells and other programs no longer receive `alt+h/j/k/l`.
 
 ## How it works
 
@@ -198,14 +178,17 @@ besides the key bindings above.
 Notes:
 
 - `rex focus` exits 0 even at the edge of the layout, so moving runs a small Lua script through
-  `rex do` instead. It compares the session's structural revision before and after focusing, which
-  changes only when focus moved, and returns `false` at the edge so smart-splits core can handle it.
+  `rex do` instead. It verifies the source pane and compares the actual focused block before and
+  after navigation. Revision changes alone (such as unzooming or renaming) do not count as moving.
+  A confirmed edge returns `false`; API failures and malformed output never trigger `at_edge = 'split'`.
 - Resizing runs the app's `pane.resize` action, so the Rex app must be running with Remote Control
   turned on in its settings.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). Tests stub Rex APIs and the `rex` CLI, so they run without Rex installed. Run `luajit tests/rex/test.lua` for the Rex-side module tests.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Unit tests stub Rex APIs and the CLI; the process-group
+regression test uses a real temporary PTY with a clean Neovim. Neither needs Rex installed.
+Run `mise run test-rex` for both Rex-side suites, or `luajit tests/rex/test.lua` for just the unit tests.
 
 ## License
 

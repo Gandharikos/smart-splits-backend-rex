@@ -95,7 +95,21 @@ All new functionality should include tests. The test suite uses:
 - nlua (Neovim Lua interpreter)
 - smart-splits core's `protocol_tests` for conformance
 
-Test files follow the pattern `tests/core/*_spec.lua`.
+Neovim backend tests follow the pattern `tests/core/*_spec.lua`.
+
+The Rex-side tests also run without a Rex server:
+
+```sh
+nvim --headless -u NONE -i NONE -l tests/rex/test.lua
+nvim --headless -u NONE -i NONE -l tests/rex/process_integration.lua
+```
+
+The first suite stubs Rex APIs and covers forwarding, process matching, foreground groups,
+failures, and host/focus safety. The second creates a temporary PTY and starts a clean Neovim
+as a child of a blocking launcher, like Yazi or broot. It checks actual process-group detection
+through launch, suspend, resume, and exit, then stops its own test processes. It needs Unix
+`ps` (macOS/BSD or Linux procps); it does not read or change your editor or Rex configuration.
+Both suites run as part of `mise run test`.
 
 ## Code Style
 
