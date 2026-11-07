@@ -105,11 +105,34 @@ nvim --headless -u NONE -i NONE -l tests/rex/process_integration.lua
 ```
 
 The first suite stubs Rex APIs and covers forwarding, process matching, foreground groups,
-failures, and host/focus safety. The second creates a temporary PTY and starts a clean Neovim
-as a child of a blocking launcher, like Yazi or broot. It checks actual process-group detection
+remote/CLI delegation, malformed remote responses, failures, and host/focus safety. The second
+creates a temporary PTY and starts a clean Neovim as a child of a blocking launcher, like Yazi
+or broot. It checks actual process-group detection
 through launch, suspend, resume, and exit, then stops its own test processes. It needs Unix
 `ps` (macOS/BSD or Linux procps); it does not read or change your editor or Rex configuration.
 Both suites run as part of `mise run test`.
+
+With Rex installed, also run:
+
+```sh
+mise run test-rex-server
+```
+
+This optional suite starts an isolated Rex server with a temporary config and socket. It creates
+its own terminal, checks shell/editor/exit detection through the real `client.action` RPC, and
+stops its own session and server. The caller's `rex.exec` is disabled to catch accidental local
+PID scans, including in a simulated forwarded action context. Your normal server is not changed.
+
+To test across machines, set `REX_TEST_SERVER` to a test server endpoint that has the updated
+module loaded with `setup()`. Set `REX_TEST_NVIM` to the Neovim executable on that server:
+
+```sh
+REX_TEST_SERVER=unix:///tmp/forwarded-rex.sock REX_TEST_NVIM=nvim mise run test-rex-server
+```
+
+The endpoint can be an SSH-forwarded Unix socket. The suite still creates and removes only its
+own test session; it does not start or stop an externally supplied server. Run the PTY and live
+server suites on both macOS and Linux when changing process detection or RPC routing.
 
 ## Code Style
 

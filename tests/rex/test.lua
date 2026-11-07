@@ -1,10 +1,11 @@
 -- Run with nvim --headless -u NONE -l tests/rex/test.lua (or luajit) from the repository root.
 local plugin = dofile('rex/lua/smart-splits-rex/init.lua')
-local ctx = { block_id = 'block:1' }
+local ctx = { session_id = 'session:1', block_id = 'block:1' }
 local state
 local count = 0
 
 local function reset()
+  ctx.server = nil
   state = {
     actions = {},
     bindings = {},
@@ -15,6 +16,9 @@ local function reset()
     server_host = 'host:1',
     focused = ctx.block_id,
     scans = 0,
+    process_queries = 0,
+    remote_calls = 0,
+    remote_is_vim = false,
   }
   rex = {
     bind = function(key)
@@ -27,13 +31,24 @@ local function reset()
       call = function(creator, method, args)
         assert(creator == 'com.superlogical.terminal' and method == 'process')
         assert(args.block_id == ctx.block_id)
+        state.process_queries = state.process_queries + 1
         if state.process_error then
           return nil, state.process_error
         end
         return { foreground = state.foreground }
       end,
     },
-    call = function(method)
+    call = function(method, args)
+      if method == 'client.action' then
+        state.remote_calls = state.remote_calls + 1
+        assert(args.action == 'smart_splits_is_vim')
+        assert(args.session_id == ctx.session_id and args.block_id == ctx.block_id)
+        assert(args.server == nil and args.servers == nil, 'must execute on the destination, not route back')
+        if state.remote_error then
+          return nil, state.remote_error
+        end
+        return state.remote_response or { result = { is_vim = state.remote_is_vim }, client_actions = {} }
+      end
       assert(method == 'server.status')
       return { host_id = state.server_host }
     end,
@@ -285,6 +300,100 @@ test('propagates focus errors', function()
   state.focus_error = 'cannot focus'
   local ok, err = pcall(run, 'focus', { direction = 'left' })
   assert(not ok and tostring(err):find('cannot focus', 1, true))
+end)
+
+for _, is_vim in ipairs({ true, false }) do
+  test('server detector returns an explicit boolean: ' .. tostring(is_vim), function()
+    if is_vim then
+      state.output = state.output .. '101 100 100 S+ nvim\n'
+    end
+    local result = state.actions.smart_splits_is_vim.run(ctx)
+    assert(type(result) == 'table' and result.is_vim == is_vim)
+    assert(state.scans == 1 and state.remote_calls == 0 and #state.calls == 0)
+  end)
+
+  test('remote detection never uses local process data: ' .. tostring(is_vim), function()
+    ctx.server = 'ymir'
+    state.remote_is_vim = is_vim
+    -- Both RPC host IDs can say ymir while rex.exec would still run on the Mac.
+    state.host, state.server_host = 'host:remote', 'host:remote'
+    state.output = ''
+    assert(plugin.is_vim(ctx) == is_vim)
+    assert(state.remote_calls == 1 and state.scans == 0 and state.process_queries == 0)
+  end)
+
+  test('CLI detection executes on its target server: ' .. tostring(is_vim), function()
+    rex.args = {}
+    rex.session_id = ctx.session_id
+    state.remote_is_vim = is_vim
+    assert(plugin.is_vim({ block_id = ctx.block_id }) == is_vim)
+    assert(state.remote_calls == 1 and state.scans == 0 and state.process_queries == 0)
+  end)
+end
+
+test('remote editor forwards focus and resize keys', function()
+  ctx.server = 'ymir'
+  state.remote_is_vim = true
+  forwards()
+  assert(state.remote_calls == 2 and state.scans == 0)
+end)
+
+test('remote shell focuses and resizes without forwarding keys', function()
+  ctx.server = 'ymir'
+  run('focus', { direction = 'left' })
+  run('resize', { direction = 'down' })
+  assert(state.calls[1].name == 'focus' and state.calls[2].name == 'pane.resize')
+  assert(state.remote_calls == 2 and state.scans == 0)
+end)
+
+test('empty server name is a local context', function()
+  ctx.server = ''
+  assert(plugin.is_vim(ctx) == false)
+  assert(state.scans == 1 and state.remote_calls == 0)
+end)
+
+test('remote context requires a session', function()
+  rejects('focus', 'no session', { block_id = ctx.block_id, server = 'ymir' })
+  assert(state.remote_calls == 0 and state.scans == 0)
+end)
+
+for _, message in ipairs({ 'action not found', 'host unreachable', 'ps not found', 'process unavailable' }) do
+  test('remote failures do not fall back to local PIDs: ' .. message, function()
+    ctx.server = 'ymir'
+    state.remote_error = message
+    rejects('focus', message)
+    rejects('resize', message)
+    assert(state.scans == 0 and state.process_queries == 0)
+  end)
+end
+
+for _, response in ipairs({ 3, 'invalid', {}, { result = true }, { result = {} }, { result = { is_vim = 'false' } } }) do
+  test('rejects malformed remote detector responses', function()
+    ctx.server = 'ymir'
+    state.remote_response = response
+    rejects('focus', 'invalid server-side Vim detection response')
+    assert(state.scans == 0)
+  end)
+end
+
+test('remote focus changes still prevent forwarding or resizing', function()
+  ctx.server = 'ymir'
+  state.remote_is_vim = true
+  state.focused = 'block:other'
+  rejects('focus', 'focused pane changed')
+  rejects('resize', 'focused pane changed')
+end)
+
+test('detector action called with remote context also delegates', function()
+  ctx.server = 'ymir'
+  state.remote_is_vim = true
+  assert(state.actions.smart_splits_is_vim.run(ctx).is_vim == true)
+  assert(state.remote_calls == 1 and state.scans == 0)
+end)
+
+test('detector action propagates local scan errors', function()
+  state.exec_error = 'ps not found'
+  rejects('is_vim', 'ps not found')
 end)
 
 print(('Rex module tests passed (%d cases)'):format(count))

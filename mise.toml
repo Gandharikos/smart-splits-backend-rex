@@ -39,6 +39,10 @@ run = [
   "nvim --headless -u NONE -i NONE -l tests/rex/process_integration.lua",
 ]
 
+[tasks.test-rex-server]
+description = "Test detection through an isolated live Rex server (requires rex)"
+run = "nvim --headless -u NONE -i NONE -l tests/rex/server_integration.lua"
+
 [tasks.test]
 description = "Run all tests"
 depends = ["deps", "test-rex"]

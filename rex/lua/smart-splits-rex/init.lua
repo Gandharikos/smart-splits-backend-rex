@@ -47,7 +47,8 @@ local function group_has_vim(ctx, foreground)
     return nil, 'foreground process has no valid PID'
   end
 
-  -- A block may run on another host. Its PIDs must never be looked up locally.
+  -- Only reached in a server-local action context, never through remote RPC routing.
+  -- A block may still run on another host. Its PIDs must never be looked up locally.
   local server, server_error = rex.call('server.status', {})
   local description, block_error = rex.session.describe_block({ block_id = ctx.block_id })
   local host = description and description.block and description.block.host_id
@@ -98,7 +99,7 @@ local function group_has_vim(ctx, foreground)
 end
 
 ---Detect the terminal's active editor, including one launched by Yazi or broot.
----Call from Rex's server-side configuration, where rex.exec runs on the server.
+---Remote action contexts and CLI scripts delegate detection to the terminal's server.
 ---@param ctx table
 ---@return boolean? is_vim nil means detection failed, not that the pane is a shell.
 ---@return string? error
@@ -106,6 +107,30 @@ function M.is_vim(ctx)
   if not ctx.block_id then
     return nil, 'no terminal block in the action context'
   end
+  -- RPCs follow ctx.server, but rex.exec always runs on the Lua runtime's machine.
+  -- rex.args is present only in CLI scripts, which may also target a remote server.
+  if (ctx.server and ctx.server ~= '') or rex.args ~= nil then
+    local session_id = ctx.session_id or rex.session_id
+    if not session_id or session_id == '' then
+      return nil, 'no session in the detection context'
+    end
+    local response, err = rex.call('client.action', {
+      action = 'smart_splits_is_vim',
+      session_id = session_id,
+      block_id = ctx.block_id,
+    })
+    if not response then
+      return nil,
+        'server-side Vim detection failed; load smart-splits-rex with setup() on the terminal server: '
+          .. (err or 'no response')
+    end
+    local result = type(response) == 'table' and response.result
+    if type(result) ~= 'table' or type(result.is_vim) ~= 'boolean' then
+      return nil, 'invalid server-side Vim detection response'
+    end
+    return result.is_vim
+  end
+
   local proc, err = rex.block.call('com.superlogical.terminal', 'process', { block_id = ctx.block_id })
   if not proc then
     return nil, err or 'cannot query the terminal process'
@@ -153,6 +178,18 @@ end
 ---@param opts? SmartSplitsRexOptions
 function M.setup(opts)
   opts = opts or {}
+  rex.action({
+    name = 'smart_splits_is_vim',
+    title = 'Smart Splits: Detect Vim',
+    run = function(ctx)
+      local is_vim, err = M.is_vim(ctx)
+      if is_vim == nil then
+        error('smart-splits: ' .. err, 0)
+      end
+      -- client.action omits a bare true result, so return an explicit boolean field.
+      return { is_vim = is_vim }
+    end,
+  })
   rex.action({
     name = 'smart_splits_focus',
     title = 'Smart Splits: Focus Pane',

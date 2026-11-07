@@ -123,9 +123,20 @@ other terminals, and ignores stopped, traced, zombie, and dead processes. Detect
 on each key, so exiting, suspending, or resuming the editor needs no persistent pane marker.
 Actions also check that the source pane is still focused after detection.
 
+For remote Rex sessions, API calls follow `ctx.server`, but `rex.exec` still runs on the
+machine executing the Lua action. Comparing RPC host IDs alone cannot make a local `ps` safe.
+The module delegates detection to the terminal server's read-only `smart_splits_is_vim` action
+through `client.action`, without forwarding the original `server` field. That action runs the
+same detector in a server-local context and returns `{ is_vim = true/false }`. CLI scripts
+also delegate, even when their context has no `server` field.
+
+Call `setup()` on **both the home server and each terminal server**. If the destination has an
+older module without the detector action, detection fails with an upgrade/setup message; it
+never falls back to scanning that server's PIDs on the caller's machine.
+
 The process-group fallback requires:
 
-- A Unix Rex server with `rex.exec`, `server.status`, and `session.describe_block` support.
+- A Unix Rex server with `rex.exec`, `server.status`, `session.describe_block`, and `client.action` support.
 - `ps` on the server's PATH, supporting `pid`, `pgid`, `tpgid`, `stat`, and `comm` columns
   (macOS/BSD `ps` or Linux procps). Each scan has a one-second timeout.
 - The terminal block and the executing server to report the same `host_id`. A remote PID must
@@ -136,10 +147,11 @@ silently treating the pane as a shell and moving or resizing the wrong pane. Dir
 editors do not need `ps`. SSH sessions or nested multiplexers that hide the editor in another
 process namespace are not automatically detected.
 
-Custom server-side actions can reuse the same detection without registering the supplied actions:
+Custom actions can reuse the same detector. The terminal server must register it with `setup()`:
 
 ```lua
 local smart_splits = dofile('/absolute/path/to/smart-splits-backend-rex/rex/lua/smart-splits-rex/init.lua')
+smart_splits.setup()
 -- Inside an action's run(ctx, args):
 local is_vim, err = smart_splits.is_vim(ctx)
 if is_vim == nil then
@@ -147,8 +159,10 @@ if is_vim == nil then
 end
 ```
 
-`is_vim(ctx)` returns `true`, `false`, or `nil, error`. Run it in the server configuration;
-`rex.exec` in a CLI script runs on the CLI machine, which may not be the terminal's host.
+`is_vim(ctx)` returns `true`, `false`, or `nil, error`. Pass the original action context so the
+server and session information are preserved. In a CLI script, pass `rex.session_id` and
+`rex.block_id` as the corresponding context fields. The destination must have this module
+loaded; calling `setup()` only in the CLI script does not install it on the server.
 Prefer the supplied actions for key bindings; they also handle key forwarding and focus checks.
 
 ### Resizing
@@ -189,6 +203,8 @@ Notes:
 See [CONTRIBUTING.md](CONTRIBUTING.md). Unit tests stub Rex APIs and the CLI; the process-group
 regression test uses a real temporary PTY with a clean Neovim. Neither needs Rex installed.
 Run `mise run test-rex` for both Rex-side suites, or `luajit tests/rex/test.lua` for just the unit tests.
+With Rex installed, `mise run test-rex-server` also checks actual server-side detection in an
+isolated Rex server, without changing your normal Rex configuration or sessions.
 
 ## License
 
